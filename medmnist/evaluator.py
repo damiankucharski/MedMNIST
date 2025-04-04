@@ -107,7 +107,7 @@ class Evaluator:
         elif split_.startswith("test"):
             split = "test"
         else:
-            flag, size, split_, *_ = filename.split("_") # for size_flag
+            flag, size, split_, *_ = filename.split("_")  # for size_flag
             if split_.startswith("train"):
                 split = "train"
             elif split_.startswith("val"):
