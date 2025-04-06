@@ -77,6 +77,8 @@ class MedMNISTLightningDataModule(pl.LightningDataModule):
         
         # Get the appropriate dataset class
         self.DataClass = getattr(medmnist, self.info['python_class'])
+
+        self._dsettrain_val_set_up = False
         
     def prepare_data(self):
         # Download the data if needed
@@ -105,33 +107,45 @@ class MedMNISTLightningDataModule(pl.LightningDataModule):
         ])
         self.data_transform = transforms.Compose(transform_list)
         
+        if stage == 'test':
         # Load base test dataset first
-        self.test_dataset = self.DataClass(split='test', transform=self.data_transform,
+            print("Setting up test set")
+            self.test_dataset = self.DataClass(split='test', transform=self.data_transform,
                                        download=self.download, as_rgb=self.as_rgb, size=self.load_size)
 
-        # Attempt K-Fold setup if val_fold is specified
-        kfold_setup_success = False
-        if self.val_fold is not None and 0 <= self.val_fold < self.k_folds:
-            print("Setting up kfolds")
-            kfold_setup_success = self._setup_kfold_split()
-            if not kfold_setup_success:
-                print("Falling back to standard train/val split due to K-Fold setup error.")
-                self.val_fold = None # Ensure we use standard split on error
+        if stage == 'fit' or stage == 'pre':
+            if not self._dsettrain_val_set_up:
+                print("Setting up train and val sets")
+            # Attempt K-Fold setup if val_fold is specified
+                kfold_setup_success = False
+                if self.val_fold is not None and 0 <= self.val_fold < self.k_folds:
+                    print("Setting up kfolds")
+                    kfold_setup_success = self._setup_kfold_split()
+                    if not kfold_setup_success:
+                        print("Falling back to standard train/val split due to K-Fold setup error.")
+                        self.val_fold = None # Ensure we use standard split on error
 
-        # Create train/val datasets based on K-Fold indices or standard splits
-        if kfold_setup_success:
-             # Load the full training dataset *once* to apply subsets
-             full_train_dataset_with_transform = self.DataClass(split='train', transform=self.data_transform,
-                                                                download=self.download, as_rgb=self.as_rgb, size=self.load_size)
-             self.train_dataset = Subset(full_train_dataset_with_transform, self.train_indices)
-             self.val_dataset = Subset(full_train_dataset_with_transform, self.val_indices)
-             print(f"Using K-Fold: {len(self.train_dataset)} train samples, {len(self.val_dataset)} val samples.")
-        else: # Handles fallback or initial non-kfold run
-            print("Using standard train/val splits.")
-            self.train_dataset = self.DataClass(split='train', transform=self.data_transform,
-                                            download=self.download, as_rgb=self.as_rgb, size=self.load_size)
-            self.val_dataset = self.DataClass(split='val', transform=self.data_transform,
-                                          download=self.download, as_rgb=self.as_rgb, size=self.load_size)
+                # Create train/val datasets based on K-Fold indices or standard splits
+                if kfold_setup_success:
+                    # Load the full training dataset *once* to apply subsets
+                    full_train_dataset_with_transform = self.DataClass(split='train', transform=self.data_transform,
+                                                                        download=self.download, as_rgb=self.as_rgb, size=self.load_size)
+                    labels = full_train_dataset_with_transform.labels
+                    self.train_dataset = Subset(full_train_dataset_with_transform, self.train_indices)
+                    self.train_dataset.labels = labels[self.train_indices]
+                    self.val_dataset = Subset(full_train_dataset_with_transform, self.val_indices)
+                    self.val_dataset.labels = labels[self.val_indices]
+                    print(f"Using K-Fold: {len(self.train_dataset)} train samples, {len(self.val_dataset)} val samples.")
+                else: # Handles fallback or initial non-kfold run
+                    print("Using standard train/val splits.")
+                    self.train_dataset = self.DataClass(split='train', transform=self.data_transform,
+                                                    download=self.download, as_rgb=self.as_rgb, size=self.load_size)
+                    self.val_dataset = self.DataClass(split='val', transform=self.data_transform,
+                                                download=self.download, as_rgb=self.as_rgb, size=self.load_size)
+                self._dsettrain_val_set_up = True
+            else:
+                print("Setup for train and val was already performed, skipping...")
+        print("Finished setup()")
         
     def train_dataloader(self):
         return torch.utils.data.DataLoader(
@@ -431,6 +445,14 @@ class MedMNISTLightningModel(pl.LightningModule):
         )
         return [optimizer], [scheduler]
 
+
+    def on_load_checkpoint(self, checkpoint):
+        print("Loading checkpoint")
+        try:
+            return super().on_load_checkpoint(checkpoint)
+        except Exception as ex:
+            print(f"{ex=}")
+
 def get_weights(task, labels):
     if task == 'multi-label, binary-class':
         weights = 1 / labels.mean(axis=0)
@@ -444,7 +466,7 @@ def get_weights(task, labels):
         weights = weights.sort_index()
         weights = weights.values
     else:
-        raise ValueError('Task must be multi-label, binary-class, , multi-class, or ordinal-regression')
+        raise ValueError('Task must be multi-label, binary-class, multi-class, or ordinal-regression')
 
     return torch.tensor(weights).float()
 
@@ -488,7 +510,7 @@ def main():
     
     # Setup model
     data_module.prepare_data()
-    data_module.setup()
+    data_module.setup(stage='pre')
     
 
     # Get task and class info
